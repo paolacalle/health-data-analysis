@@ -1,0 +1,44 @@
+
+
+
+# Reserach questions
+
+- Did I work out that day? (Yes/No) vs Mean Heart Rate (vs Resting Heart Rate)
+- Type of workout vs mean heart rate per day. 
+- Year vs mean heart rate.
+- Year vs number of completed workouts.
+
+# Did I work out that day?  (Yes/No) vs Mean Heart Rate (vs Resting Heart Rate)
+
+
+# Workout Type vs Mean HR per Day
+
+- Assign a priority/intensity score per workout type.
+
+
+# Number of Times Workout vs Mean HR per Day
+
+
+# Year vs Mean Heart Rate
+
+- Compare with yearly workout totals — is HR going down as workouts go up?
+- Factor in average body mass or BMI, if available — HR might correlate.
+
+# Year vs Number of Completed Workouts
+
+- By season/month (do you work out more in summer?)
+- Add a “consistency score”: How many weeks did you work out at least once?
+
+# Workout Frequency vs. Weight/BMI Changes
+
+- Does more frequent working out actually correlate with lower body mass/BMI over time?
+- Could be structured as a weekly or monthly trend.
+
+# Day and Heart Rate
+
+- Split workout frequency or HR trends by day of week.
+
+# Time of Day vs Workout Type
+
+- Do I tend to do cardio in the morning and strength in the evening?
+
