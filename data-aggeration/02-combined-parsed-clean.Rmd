@@ -1,0 +1,248 @@
+
+
+```{r}
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(tidyr)
+```
+
+
+
+```{r}
+
+
+path_aggregated_data <- "../data/01-parse-convert-xml/"
+workout_file <- file.path(path_aggregated_data, "apple_health_workout.csv")
+record_file <- file.path(path_aggregated_data, "apple_health_parsed_cda.csv")
+active_file <- file.path(path_aggregated_data, "apple_health_active_summary.csv")
+
+```
+
+
+# active 
+
+```{r}
+actives_day <- read.csv(active_file, header = TRUE)
+actives_day
+```
+
+# Workouts
+
+```{r}
+# initial cleaning
+workouts <- read.csv(workout_file, header = TRUE)
+
+# only apple watch source
+workouts <- workouts |>
+  mutate(
+    workoutType = str_remove(workoutActivityType, "HKWorkoutActivityType"),
+    startDate = ymd_hms(startDate),
+    endDate = ymd_hms(endDate),
+    date = as.Date(startDate)
+  ) |> 
+  filter(
+    sourceName != "Lose It!" 
+  )
+```
+
+
+```{r}
+
+top_types_count <- workouts |>
+  mutate(year = format(as.Date(date), "%Y")) |>
+  group_by(year, workoutType) |>
+  summarise(count = n(), .groups = "drop") |>
+  arrange(desc(count))
+
+
+workout_type_year <- ggplot(top_types_count, aes(x = reorder(workoutType, -count), y = count, fill = year)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Workout Type Counts by Year",
+    x = "Workout Type",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+workout_type_year
+```
+
+
+
+# Reords
+
+```{r}
+
+records <- read.csv(record_file, header = TRUE)
+
+records <- records |>
+  mutate(
+    typeMeasure = str_remove(type, "HKQuantityTypeIdentifier"),
+    date = as.Date(startDate),
+    year = format(as.Date(date), "%Y"),
+    month = as.numeric(format(as.Date(date), "%m")),
+    isOver = ifelse(value > 135, 1, 0),
+    season = case_when(
+      month %in% c(12, 1, 2)  ~ "Winter",
+      month %in% c(3, 4, 5)   ~ "Spring",
+      month %in% c(6, 7, 8)   ~ "Summer",
+      month %in% c(9, 10, 11) ~ "Fall"
+    ), 
+  )
+
+```
+
+# Body Mass
+
+```{r}
+body_mass_records <- records |> 
+  filter(typeMeasure == "BodyMass")
+
+monthly_stats <- body_mass_records |> 
+  group_by(season) |> 
+  summarise(
+    count = n(),
+    overCount = sum(isOver),
+    percentOver = mean(isOver) * 100,
+    meanBodyMass = mean(value),
+    .groups = "drop"
+  )
+
+
+logit_model <- logit_model <- glm(
+  cbind(overCount, count - overCount) ~ season,
+  data = monthly_stats,
+  family = binomial()
+)
+
+monthly_stats$prob <- predict(logit_model, type = "response")
+
+monthly_stats$season <- factor(
+  monthly_stats$season,
+  levels = c("Winter", "Spring", "Summer", "Fall")
+)
+
+
+ggplot(monthly_stats, aes(x = season, y = prob, fill = season)) +
+  geom_col(color = "black", width = 0.6) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Predicted Probability of Body Mass > 135kg by Season",
+    x = "Season",
+    y = "Probability (%)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+
+poisson_model <- glm(overCount ~ as.factor(season), data = monthly_stats, family = poisson(link = "log"))
+monthly_stats$predicted <- fitted(poisson_model)
+
+
+body_mass_records_day <- records |> 
+  filter(typeMeasure == "BodyMass") |> 
+  mutate(date = as.Date(startDate)) |> 
+  group_by(date) |> 
+  summarise(avg_weight = mean(value))
+
+actives_day <- actives_day |>
+  mutate(date = as.Date(dateComponents))
+
+combined_day <- full_join(actives_day, body_mass_records_day, by = "date")
+
+
+
+```
+
+
+## HR
+
+```{r}
+
+HR_records <- records |> 
+  filter(
+    typeMeasure == "HeartRate"
+  )
+
+# group by day 
+HR_records_grouped_by_day <- HR_records |>
+  group_by(
+    date
+  ) |>
+  mutate(
+    avgHR = mean(value),
+  ) |> 
+  ungroup()
+
+workout_day <- workouts |> 
+  select(workoutType, duration, startDate, endDate, date) |> 
+  mutate(
+    startTime = strftime(startDate, format="%H:%M:%S"),
+    endTime = strftime(endDate, format="%H:%M:%S")
+  ) |> 
+  select(workoutType, duration, date, startTime, endTime)
+  
+
+# merge
+HR_during_workout <- merge(
+  x = HR_records_grouped_by_day, 
+  y = workout_day, 
+  by = "date", 
+  all = TRUE
+) |> 
+  mutate(
+    duringWorkout = (startTime.x >= startTime.y) & (endTime.x <= endTime.y),
+    hrStartTime = startTime.x,
+    hrEndTime = endTime.x,
+    workoutStartTime = startTime.y,
+    workoutEndTime = endTime.y
+  ) |> 
+  select(
+    date, value, hrStartTime, hrEndTime, 
+    workoutStartTime, workoutEndTime, avgHR, duration, duringWorkout, workoutType
+  )
+
+dates_worked_out <- HR_during_workout |>
+  group_by(date, hrStartTime, hrEndTime, value) |> 
+  summarise(
+    duringWorkout = any(duringWorkout, na.rm = TRUE),
+    list_workouts = paste(unique(workoutType[duringWorkout]), collapse = ", "),
+    .groups = "drop"
+  ) |>
+  mutate(
+    list_workouts = ifelse(list_workouts == "", "no_workout", list_workouts)
+  )
+
+# Explode the list_workouts
+workout_wide <- dates_worked_out |> 
+  separate_rows(list_workouts, sep = ", ") |> 
+  mutate(workout_present = TRUE) |> 
+  pivot_wider(
+    names_from = list_workouts,
+    values_from = workout_present,
+    values_fill = FALSE
+  )
+
+
+# dataset for analysis
+full_combined <- full_join(workout_wide, combined_day, by = "date") |>
+  select(-dateComponents, -startDate)
+write.csv(full_combined, "../data/02-combined-parsed-clean/full_combined.csv", row.names = FALSE)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,811 @@
+---
+title: "Workout & Heart Rate Analysis"
+author: "Paola Calle"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
+    toc: true
+    toc_depth: 2
+geometry: margin=1in
+fontsize: 11pt
+---
+
+```{r, echo = FALSE, message = FALSE}
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(tidyr)
+library(patchwork)
+library(broom)
+library(effects)
+# library(plotly)
+library(purrr)
+library(glue)
+library(pROC)
+library(knitr)
+library(gridExtra)
+```
+
+```{r, echo = FALSE}
+
+
+path_aggregated_data <- "../data/"
+parsed_file <-  file.path(path_aggregated_data, "02-combined-parsed-clean/full_combined.csv")
+
+
+```
+
+```{r, echo = FALSE}
+parsed <- read.csv(parsed_file, header = TRUE) |> 
+  rename(heartRate = value)
+```
+
+```{r, echo = FALSE}
+parsed_clean_by_day <- parsed |> 
+  group_by(date) |> 
+  summarise(
+    low_heart_rate = min(heartRate),
+    high_heart_rate = max(heartRate),
+    day_avg_heart_rate = mean(heartRate),
+    worked_out = any(duringWorkout),
+    ran = any(Running),
+    walk = any(Walking),
+    weight = first(avg_weight),
+    EnergyBurned = first(activeEnergyBurned),
+    ExerciseTime = first(appleExerciseTime),
+    standHours = first(appleStandHours),
+    activeEnergyGoalAchieved = first(activeEnergyBurned) >= first(activeEnergyBurnedGoal),
+    appleExerciseTimeGoalAchieved = first(appleExerciseTime) >= first(appleExerciseTimeGoal),
+    appleStandHoursGoalAchieved = first(appleStandHours) >= first(appleStandHoursGoal),
+    .groups = "drop"
+  ) |>
+  drop_na(activeEnergyGoalAchieved, day_avg_heart_rate)  # likely didn't wear watch
+
+# Group by month and summarize
+parsed_monthly_summary <- parsed_clean_by_day |> 
+  mutate(
+    month = as.numeric(format(as.Date(date), "%m")),
+    year = as.numeric(format(as.Date(date), "%y"))
+    ) |> 
+  group_by(year, month) |> 
+  summarise(
+    low_heart_rate = mean(low_heart_rate),
+    high_heart_rate = mean(high_heart_rate),
+    avg_heart_rate = mean(day_avg_heart_rate),
+    total_days = n(),
+    num_worked_out = sum(worked_out == TRUE),
+    num_ran = sum(ran == TRUE),
+    num_walk = sum(walk == TRUE),
+    EnergyBurned = mean(EnergyBurned),
+    ExerciseTime = mean(ExerciseTime),
+    standHours = mean(standHours),
+    
+    num_achieved_energy_goal = sum(activeEnergyGoalAchieved == TRUE),
+    num_achieved_exercise_goal = sum(appleExerciseTimeGoalAchieved == TRUE),
+    num_achieved_stand_goal = sum(appleStandHoursGoalAchieved == TRUE),
+    .groups = "drop"
+  )
+
+```
+
+# The Data
+
+This analysis uses personal health data collected from Apple Health via Apple Watch, spanning from 2022 to the present. The dataset includes daily and monthly summaries of various activity and biometric metrics automatically recorded by Apple’s health tracking ecosystem.
+
+# Intial Graphs
+
+### Heart Rate Across Time
+
+The plot shows monthly heart rate trends from 2022 to early 2025. Average heart rate stays mostly stable around 80–100 bpm, with a noticeable spike in early 2025. The shaded area shows a consistent range between low and high heart rates each month.
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+parsed_monthly_summary <- parsed_monthly_summary |> 
+  mutate(month_year = as.Date(paste0("20", year, "-", month, "-01")))
+
+p <- ggplot(parsed_monthly_summary, aes(x = month_year)) +
+  geom_ribbon(aes(ymin = low_heart_rate, ymax = high_heart_rate), fill = "#E9C46A", alpha = 0.4) +
+  geom_line(aes(y = avg_heart_rate), color = "#264653", size = 1.2) +
+  labs(
+    title = "Heart Rate Range and Average by Month",
+    x = "Year",
+    y = "Heart Rate (bpm)"
+  ) +
+  theme_minimal(base_size = 14)
+
+p
+
+```
+
+### Times Ran and Walked Across Time
+
+```{r, echo = FALSE}
+
+
+
+# Pivot data longer: one row per activity per month
+activity_long <- parsed_monthly_summary |>
+  select(month_year, num_ran, num_walk) |>
+  pivot_longer(cols = c(num_ran, num_walk),
+               names_to = "activity",
+               values_to = "count") |>
+  mutate(activity = recode(activity, num_ran = "Ran", num_walk = "Walked"))
+
+# Plot using ggplot
+combined_plot <- ggplot(activity_long, aes(x = month_year, y = count, fill = activity)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~activity, ncol = 1, scales = "free_y") +
+  scale_fill_manual(values = c("Ran" = "#e76f51", "Walked" = "#2a9d8f")) +
+  scale_x_date(date_labels = "%b %Y", breaks = "3 months") +
+  labs(
+    title = "Monthly Activity Count",
+    subtitle = "Faceted view of running and walking activity over time",
+    x = "",
+    y = "Activity Count"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Make it interactive
+combined_plot
+```
+
+### Number of days each goal was achieved per month
+
+```{r, echo = FALSE}
+
+goal_colors <- c(
+  "Energy"   = "#e76f51",
+  "Exercise" = "#2a9d8f",
+  "Stand"    = "#264653"
+)
+
+parsed_monthly_summary |>
+  pivot_longer(
+    cols = starts_with("num_achieved"),
+    names_to = "goal",
+    values_to = "count"
+  ) |>
+  mutate(
+    goal = case_when(
+      goal == "num_achieved_energy_goal"   ~ "Energy",
+      goal == "num_achieved_exercise_goal" ~ "Exercise",
+      goal == "num_achieved_stand_goal"    ~ "Stand",
+      TRUE ~ goal
+    )
+  ) |>
+  ggplot(aes(x = month_year, y = count, color = goal)) +
+  geom_line(size = 1.5) +
+  geom_point(size = 3) +
+  scale_color_manual(values = goal_colors) +
+  scale_x_date(date_labels = "%b %Y", breaks = "3 months") +
+  labs(
+    title = "Monthly Goal Achievements",
+    x = "Month",
+    y = "Days Achieved",
+    color = "Goal Type"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 12, margin = margin(b = 10))
+  )
+
+
+```
+
+# Analaysis 1: Did I work out that day?
+
+### Poisson (Predicting Count of Workout Days Across Months) Vs. Linear Model
+
+The Poisson (red) and linear (purple) lines are nearly identical across all three heart rate types. Because the Poisson line closely follows the linear regression line, we can conclude:
+
+-   The relationship between heart rate and workout count is well captured using a Poisson model, which is statistically more appropriate for counts.
+-   There’s no major non-linearity or overdispersion visible that would make the Poisson model clearly inferior or inappropriate.
+
+```{r}
+low_model <- glm(num_worked_out ~ low_heart_rate, family = poisson(link = "log"), 
+                 data = parsed_monthly_summary)
+high_model <- glm(num_worked_out ~ high_heart_rate, family = poisson(link = "log"), 
+                  data = parsed_monthly_summary)
+avg_model <- glm(num_worked_out ~ avg_heart_rate, family = poisson(link = "log"), 
+                 data = parsed_monthly_summary)
+
+low_lm_model <- lm(num_worked_out ~ low_heart_rate, data = parsed_monthly_summary)
+high_lm_model <- lm(num_worked_out ~ high_heart_rate, data = parsed_monthly_summary)
+avg_lm_model <- lm(num_worked_out ~ avg_heart_rate, data = parsed_monthly_summary)
+
+
+```
+
+```{r, echo = FALSE}
+
+observed_long <- parsed_monthly_summary |>
+  select(num_worked_out, low_heart_rate, high_heart_rate, avg_heart_rate) |>
+  pivot_longer(
+    cols = c(low_heart_rate, high_heart_rate, avg_heart_rate),
+    names_to = "model",
+    values_to = "heart_rate"
+  ) |>
+  mutate(model = case_when(
+    model == "low_heart_rate" ~ "Low HR",
+    model == "high_heart_rate" ~ "High HR",
+    model == "avg_heart_rate" ~ "Avg HR"
+  ))
+
+
+# Generate sequences and predictions
+low_range <- tibble(heart_rate = seq(min(parsed_monthly_summary$low_heart_rate, na.rm = TRUE),
+                                     max(parsed_monthly_summary$low_heart_rate, na.rm = TRUE), length.out = 100),
+                    model = "Low HR")
+low_range$predicted <- predict(low_model, newdata = tibble(low_heart_rate = low_range$heart_rate), type = "response")
+
+high_range <- tibble(heart_rate = seq(min(parsed_monthly_summary$high_heart_rate, na.rm = TRUE),
+                                      max(parsed_monthly_summary$high_heart_rate, na.rm = TRUE), length.out = 100),
+                     model = "High HR")
+high_range$predicted <- predict(high_model, newdata = tibble(high_heart_rate = high_range$heart_rate), type = "response")
+
+avg_range <- tibble(heart_rate = seq(min(parsed_monthly_summary$avg_heart_rate, na.rm = TRUE),
+                                     max(parsed_monthly_summary$avg_heart_rate, na.rm = TRUE), length.out = 100),
+                    model = "Avg HR")
+avg_range$predicted <- predict(avg_model, newdata = tibble(avg_heart_rate = avg_range$heart_rate), type = "response")
+
+
+# lm pred
+low_range$linear <- predict(low_lm_model, newdata = tibble(low_heart_rate = low_range$heart_rate))
+high_range$linear <- predict(high_lm_model, newdata = tibble(high_heart_rate = high_range$heart_rate))
+avg_range$linear <- predict(avg_lm_model, newdata = tibble(avg_heart_rate = avg_range$heart_rate))
+
+combined_preds <- bind_rows(low_range, high_range, avg_range)
+
+ggplot() +
+  # Actual data points
+  geom_point(data = observed_long, aes(x = heart_rate, y = num_worked_out), 
+             color = "gray40", alpha = 0.6, size = 2) +
+  
+  # Model predictions
+  geom_line(data = combined_preds, aes(x = heart_rate, y = predicted), 
+            color = "#E76F51", size = 1.2) +
+  
+  # Add linear model lines
+  geom_line(data = combined_preds, aes(x = heart_rate, y = linear), 
+            color = "purple", linetype = "dashed", size = 1) +
+
+
+  facet_wrap(~model, scales = "free_x", ncol = 1) +
+  labs(
+    title = "Workouts vs Heart Rate (Actual, Smoothed, and Predicted)",
+    subtitle = "Purple = Linear, Red = Poissons",
+    x = "Heart Rate (bpm)",
+    y = "Number of Workouts"
+  ) +
+  theme_minimal(base_size = 10) 
+
+
+```
+
+### Tests
+
+```{r, echo = FALSE}
+# Helper function to compute stats and return interpretation string
+get_poss_model_stats <- function(model) {
+  c <- coef(model)[1]
+  coef_summary <- summary(model)$coefficients
+  beta <- coef_summary[2, 1]          # Coefficient (b1)
+  SE_beta <- coef_summary[2, 2]       # Standard error
+  z_score <- abs(beta / SE_beta)      # z-statistic
+  z_squared <- z_score^2              # Wald Chi-square
+  p_value <- 2 * (1 - pnorm(z_score)) # two-tailed p-value
+  
+  # Extract deviance explained by predictor from ANOVA
+  dev <- anova(model, test = "Chisq")
+  deviance_explained <- dev$Deviance[2]
+  
+  # Generate model formula string
+  str_model_log <- sprintf("log(u) = %.3f + %.3f * x", c, beta)
+  
+  tibble(
+    term = rownames(coef_summary)[2],
+    beta = round(beta, 3),
+    SE = round(SE_beta, 3),
+    z_score = round(z_score, 3),
+    z_squared = round(z_squared, 3),
+    p_value = round(p_value, 5),
+    deviance_explained = round(deviance_explained, 3),
+    formula_str = str_model_log
+  )
+
+}
+
+# Run for each model
+low_stats  <- get_poss_model_stats(low_model)  |> mutate(model = "Low HR")
+high_stats <- get_poss_model_stats(high_model) |> mutate(model = "High HR")
+avg_stats  <- get_poss_model_stats(avg_model)  |> mutate(model = "Avg HR")
+
+# Combine and view
+model_summary_table <- bind_rows(low_stats, high_stats, avg_stats) |>
+  select(model, beta, SE, z_score, z_squared, p_value, deviance_explained)
+
+model_summary_table |> 
+  kable(caption = "Model Summary Table")
+
+```
+
+#### Interpretation of Results
+So...
+
+Low Heart Rate (Resting HR)
+
+-   Strongest predictor (highest z, lowest p-value, most deviance explained)
+-   Negative beta = Lower resting HR is associated with more workouts
+-   A 1 bpm decrease in resting HR increases expected workouts by \~10% (e\^-0.109 ≈ 0.897 = \~10% reduction in workouts per 1 bpm increase)
+
+High HR adds value but to a lesser degree.
+
+-   Also significant (p \~ .0018)
+-   Positive beta = Higher peak HR is associated with more workouts
+-   Each 1 bpm increase in high HR predicts a \~2.3% increase in workout days.
+
+Average Heart Rate
+
+-   Not significant (p = 0.187)
+-   Possibly too noisy or generic a measure to reflect true activity behavior
+
+### Logistic Binary (Predicting Whether I Worked Out on a Given Day)
+
+```{r}
+low_model <- glm(worked_out ~ low_heart_rate, family = binomial(), data = parsed_clean_by_day)
+high_model <- glm(worked_out ~ high_heart_rate, family = binomial(), data = parsed_clean_by_day)
+avg_model <- glm(worked_out ~ day_avg_heart_rate, family = binomial(), data = parsed_clean_by_day)
+```
+
+```{r, echo = FALSE}
+get_logit_model_stats <- function(model) {
+  intercept <- coef(model)[1]
+  coef_summary <- summary(model)$coefficients
+  beta <- coef_summary[2, 1]
+  SE_beta <- coef_summary[2, 2]
+  z_score <- abs(beta / SE_beta)
+  z_squared <- z_score^2
+  p_value <- 2 * (1 - pnorm(z_score))
+
+  # Logistic interpretation
+  odds_ratio <- exp(beta)
+  log_formula <- sprintf("logit(p) = %.3f + %.3f * x", intercept, beta)
+  odds_ratio_str <- sprintf("e^B = %.3f (odds ratio)", odds_ratio)
+
+  tibble(
+    term = rownames(coef_summary)[2],
+    beta = round(beta, 3),
+    SE = round(SE_beta, 3),
+    z_score = round(z_score, 3),
+    z_squared = round(z_squared, 3),
+    p_value = round(p_value, 5),
+    odds_ratio = round(odds_ratio, 3),
+    formula_str = log_formula,
+    odds_ratio_str = odds_ratio_str
+  )
+
+}
+
+low_stats  <- get_logit_model_stats(low_model)  |> mutate(model = "Low HR")
+high_stats <- get_logit_model_stats(high_model) |> mutate(model = "High HR")
+avg_stats <- get_logit_model_stats(avg_model) |> mutate(model = "Avg HR")
+
+bind_rows(low_stats, high_stats, avg_stats) |> 
+  select(model, beta, SE, z_score, p_value, odds_ratio) |>
+  kable()
+
+```
+
+Average Heart Rate
+
+-   Has the strongest effect on predicting workout likelihood.
+-   Every 1 bpm increase in avg HR is associated with a 9.4% increase in the odds of having worked out that day.
+-   Highly statistically significant (p \< 0.0001), indicating a robust relationship.
+
+High Heart Rate
+
+-   Also a significant predictor.
+-   Every 1 bpm increase in high HR increases the odds of working out by 5.6%.
+-   Likely reflects workout intensity -- a higher max HR is a strong indicator that I engaged in physical effort.
+
+Low Heart Rate
+
+-   Not statistically significant (p = 0.465).
+-   Small beta (0.011) and an odds ratio close to 1 suggest no reliable link between low HR (resting) and working out on that specific day.
+-   May be more useful for modeling long-term fitness, rather than day-level behavior.
+
+# Analaysis 2: Seasons
+
+## Count of Workouts per Month
+
+This boxplot shows how my monthly workout counts vary across seasons, summarizing data over multiple years.
+
+```{r, echo=FALSE}
+season_summary <- tibble::tibble(
+  Season = c("Spring", "Summer", "Fall", "Winter"),
+  `Activity Level` = c("High & consistent", "Variable", "High & consistent", "Lower"),
+  Notes = c(
+    "Strong, steady routine",
+    "Some very active, some low months",
+    "Likely a return to routine",
+    "Less frequent workouts, higher drop-off"
+  )
+)
+
+kable(season_summary, caption = "Summary of Workout Behavior by Season")
+
+```
+
+```{r, echo = FALSE}
+parsed_monthly_summary <- parsed_monthly_summary |>
+  mutate(
+    season = case_when(
+      month %in% c(12, 1, 2)  ~ "Winter",
+      month %in% c(3, 4, 5)   ~ "Spring",
+      month %in% c(6, 7, 8)   ~ "Summer",
+      month %in% c(9, 10, 11) ~ "Fall"
+    ),
+    season = factor(season, levels = c("Winter", "Spring", "Summer", "Fall")),
+    month_year = as.Date(sprintf("20%02d-%02d-01", year, month))
+  )
+
+
+ggplot(parsed_monthly_summary, aes(x = season, y = num_worked_out, fill = season)) +
+  geom_boxplot(width = 0.6, alpha = 0.8, color = "gray30") +
+  labs(
+    title = "Distribution of Workouts by Season",
+    subtitle = "Across All Months and Years",
+    x = "Season",
+    y = "Workouts"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+```
+
+## Poisson Regression: Can It Predict My Monthly Workout Count... Based on Season?
+
+```{r}
+
+poisson_season_model <- glm(
+  num_worked_out ~ season,
+  data = parsed_monthly_summary,
+  family = poisson(link = "log")
+)
+
+# summary(poisson_season_model)
+```
+
+```{r, echo = FALSE}
+
+coeff_table <- tibble::tibble(
+  Term = c("Intercept", "Spring", "Summer", "Fall"),
+  Estimate = c(2.66259, 0.13469, 0.11692, 0.25818),
+  `p-value` = c("< 0.001", "0.252", "0.334", "0.028"),
+  Interpretation = c(
+    "Baseline: Winter. Exp(2.66) ~ 14.3 workouts/month in winter.",
+    "Not statistically significant. Spring may slightly increase workouts, but we're not confident.",
+    "Also not significant. Summer doesn’t strongly differ from winter in workout counts.",
+    "Statistically significant! Fall months have higher workout counts compared to winter (about 29% more, exp(0.258) ~ 1.29)."
+  )
+)
+
+kable(coeff_table, caption = "Coefficients Table: Poisson Regression of Workouts by Season")
+
+
+```
+
+#### Model Fit
+
+-   Null deviance: 70.58
+-   Residual deviance: 65.65
+-   Chi-squared test p-value: 0.1766
+
+This means that while fall stands out, season overall is not a strong predictor of workout count across all months and years.
+
+## Logistic Regression — Daily Probability of Working Out
+
+```{r, echo = FALSE}
+
+# Ensure season exists on the daily level
+parsed_clean_by_day <- parsed_clean_by_day |>
+  mutate(
+    season = case_when(
+      month(date) %in% c(12, 1, 2)  ~ "Winter",
+      month(date) %in% c(3, 4, 5)   ~ "Spring",
+      month(date) %in% c(6, 7, 8)   ~ "Summer",
+      month(date) %in% c(9, 10, 11) ~ "Fall"
+    ),
+    season = factor(season, levels = c("Winter", "Spring", "Summer", "Fall"))
+  )
+
+```
+
+```{r}
+# Binary outcome: worked out or not
+logit_season_model <- glm(
+  worked_out ~ season,
+  data = parsed_clean_by_day,
+  family = binomial()
+)
+```
+
+```{r, echo = FALSE}
+
+season_logistic_table <- tibble::tibble(
+  Term = c("Intercept (Winter)", "Spring", "Summer", "Fall"),
+  Estimate = c(0.46536, -0.06598, -0.27612, 0.03751),
+  `p-value` = c(0.001, 0.725, 0.142, 0.843),
+  Interpretation = c(
+    "Winter is the baseline. Converts to ~61% chance of working out (exp(0.465)/(1 + exp(0.465)) ≈ 0.614).",
+    "Not significant. Slightly lower odds of working out vs. winter.",
+    "Also not significant. Suggests decreased odds, but we can't confidently say so.",
+    "Nearly no effect, and not statistically significant."
+  )
+)
+
+kable(season_logistic_table, caption = "Logistic Regression Coefficients: Predicting Daily Workout from Season")
+```
+
+#### Chi-squared test (ANOVA): 
+The p = 0.2938 indicate that season as a whole does not significantly improve model fit.
+
+```{r}
+# anova(logit_season_model)
+```
+
+
+#### Visualize
+
+```{r, echo = FALSE}
+
+grid.arrange(
+  plot(allEffects(poisson_season_model), main = "Estimated Workouts per Season (Poisson)"),
+  plot(allEffects(logit_season_model), main = "Probability of Working Out by Season (Logit)"),
+  ncol = 2
+)
+```
+
+# Consistency Score - Goals Meet
+
+```{r, echo = FALSE}
+
+# Ensure date is in proper Date format
+parsed_clean_by_day <- parsed_clean_by_day |>
+  mutate(date = as.Date(date))
+
+# Extract time components
+parsed_clean_by_day <- parsed_clean_by_day |>
+  mutate(
+    week_start = floor_date(date, unit = "week", week_start = 1),
+    year = year(date),
+    month = month(date)
+  )
+
+# 1. Get weekly consistency (at least 1 workout per week)
+weekly_workout_flags <- parsed_clean_by_day |>
+  group_by(year, month, week_start) |>
+  summarise(worked_out = any(worked_out), .groups = "drop")
+
+# 2. Get heart rate monthly averages
+monthly_hr <- parsed_clean_by_day |>
+  group_by(year, month) |>
+  summarise(
+    low_heart_rate = mean(low_heart_rate, na.rm = TRUE),
+    high_heart_rate = mean(high_heart_rate, na.rm = TRUE),
+    day_avg_heart_rate = mean(day_avg_heart_rate, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 3. Get monthly goal achievements
+monthly_goals <- parsed_clean_by_day |>
+  group_by(year, month) |>
+  summarise(
+    num_achieved_energy_goal = sum(activeEnergyGoalAchieved == TRUE, na.rm = TRUE),
+    num_achieved_exercise_goal = sum(appleExerciseTimeGoalAchieved == TRUE, na.rm = TRUE),
+    num_achieved_stand_goal = sum(appleStandHoursGoalAchieved == TRUE, na.rm = TRUE),
+    
+    num_trifecta_days = sum(
+      activeEnergyGoalAchieved & 
+      appleExerciseTimeGoalAchieved & 
+      appleStandHoursGoalAchieved,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+# 4. Combine consistency + HR + goals
+monthly_consistency <- weekly_workout_flags |>
+  group_by(year, month) |>
+  summarise(
+    consistency_score = sum(worked_out),
+    possible_weeks = n(),
+    consistency_pct = round(100 * consistency_score / possible_weeks, 1),
+    .groups = "drop"
+  ) |>
+  left_join(monthly_hr, by = c("year", "month")) |>
+  left_join(monthly_goals, by = c("year", "month"))
+
+
+# 5. Add season column
+monthly_consistency <- monthly_consistency |>
+  mutate(
+    season = case_when(
+      month %in% c(12, 1, 2)  ~ "Winter",
+      month %in% c(3, 4, 5)   ~ "Spring",
+      month %in% c(6, 7, 8)   ~ "Summer",
+      month %in% c(9, 10, 11) ~ "Fall"
+    ),
+    season = factor(season, levels = c("Winter", "Spring", "Summer", "Fall"))
+  )
+
+
+```
+
+### Trifecta Days as Count Outcome (Poisson Regression) -- Monthly
+
+Conclusion: I am slightly more likely to hit my trifecta goals in summer (with a potential ~31% increase), but the effect of season overall isn't statistically strong. Winter remains my base with ~8 trifecta days/month.
+
+
+```{r, echo = TRUE}
+glm_trifecta <- glm(num_trifecta_days ~ season, data = monthly_consistency, family = poisson())
+#summary(glm_trifecta)
+```
+
+```{r, echo = FALSE}
+trifecta_season_table <- tibble::tibble(
+  Term = c("Intercept (Winter)", "Spring", "Summer", "Fall"),
+  Estimate = c(2.0655, 0.2471, 0.2699, 0.2482),
+  `p-value` = c("< 0.001", "0.111", "0.087", "0.117"),
+  Interpretation = c(
+    "Baseline (Winter): On average, ~7.88 trifecta days/month in winter. --> exp(2.0655) ≈ 7.88",
+    "Not statistically significant. Spring may increase trifecta days by ~28% (exp(0.247)), but we can't say confidently.",
+    "Marginally significant (p ~ 0.087). Could imply ~31% more trifecta days than winter (exp(0.27) ~ 1.31).",
+    "Similar to spring — slight positive trend (~28% increase), but not statistically strong."
+  )
+)
+
+kable(trifecta_season_table, caption = "Poisson Regression: Predicting Trifecta Days by Season")
+
+```
+
+## Model Odds of “Trifecta Day” (logistic version) -- Daily
+
+Season has no significant influence on the likelihood of hitting a trifecta day.
+I am about 1 in 3 likely to hit all 3 goals on any given day in winter -- and that probability stays pretty stable across seasons.
+
+```{r, echo = TRUE}
+parsed_clean_by_day <- parsed_clean_by_day |>
+  mutate(trifecta_day = activeEnergyGoalAchieved & appleExerciseTimeGoalAchieved & appleStandHoursGoalAchieved)
+
+glm_trifecta_day <- glm(trifecta_day ~ factor(season), data = parsed_clean_by_day, family = binomial())
+```
+```{r, echo = FALSE}
+trifecta_logistic_table <- tibble::tibble(
+  Term = c("Intercept (Winter)", "Spring", "Summer", "Fall"),
+  Estimate = c(-0.672, 0.134, 0.057, 0.007),
+  `p-value` = c("< 0.001", "0.487", "0.770", "0.973"),
+  Interpretation = c(
+    "Winter is the baseline. Converts to ~33.8% chance of a trifecta day: exp(-0.672) / (1 + exp(-0.672)) ≈ 0.338.",
+    "Not significant. Small (non-reliable) increase in odds vs. winter.",
+    "No meaningful difference from winter.",
+    "Almost identical to winter — essentially no effect."
+  )
+)
+
+kable(trifecta_logistic_table, caption = "Logistic Regression: Predicting Trifecta Days from Season")
+```
+
+# Ran and Season
+
+This model estimates the likelihood of going for a run on a given day using season as the predictor.
+Fall is my most reliably active season for running, with a significant increase in the likelihood of going for a run compared to winter.
+Spring and summer show no significant change, but summer might actually suppress my running tendencies a bit.
+
+
+```{r, echo = TRUE}
+ran_season <- glm(ran ~ factor(season), data = parsed_clean_by_day, family = binomial())
+```
+
+```{r, echo=FALSE}
+ran_logistic_table <- tibble::tibble(
+  Term = c("Intercept (Winter)", "Spring", "Summer", "Fall"),
+  Estimate = c(-1.1371, 0.1428, -0.3215, 0.4884),
+  `p-value` = c("< 0.001", "0.498", "0.153", "0.018"),
+  Interpretation = c(
+    "Winter is the baseline. This converts to a 24.2% chance of running: exp(-1.1371)/(1+exp(-1.1371)) ≈ 0.242",
+    "Not significant. Slight increase in odds vs. winter, but not reliable.",
+    "Not significant, but suggests lower odds of running in summer vs. winter.",
+    "Statistically significant. Fall has 63% higher odds of running compared to winter. (exp(0.4884) ≈ 1.63)"
+  )
+)
+
+kable(ran_logistic_table, caption = "Logistic Regression: Predicting Running Behavior by Season")
+
+```
+
+##### Model Fit Summary
+
+- Null deviance: 1171.0
+- Residual deviance: 1153.9
+- AIC: 1161.9
+Season explains some variance in running behavior — particularly due to Fall’s significance
+
+# Brute Force Athlete Heart Rate ROC
+Exhaustive AUC Comparison of Predictor Combinations for is_athlete Classification
+
+`is_athlete` Variable
+
+- is_athlete = TRUE --> My lowest recorded heart rate for the day was between 40 and 60 bpm, which is a common physiological range for trained athletes.
+
+- is_athlete = FALSE --> My lowest heart rate fell outside that range (either below 40 or above 60 bpm), so they likely don’t exhibit resting HR levels consistent with trained athletes.
+
+This script performs automated model selection by:
+
+- Testing all combinations of predictors (1 to 6 variables at a time).
+- Fitting a logistic regression model to predict whether a day belongs to an "athlete" heart rate profile.
+- Evaluating each model's predictive performance using AUC (Area Under the ROC Curve).
+- Returning a sorted table of models ranked by their AUC.
+
+Why AUC?
+
+- AUC reflects how well the model distinguishes between classes (is_athlete = TRUE/FALSE).
+- AUC of 1.0 = perfect model, 0.5 = random guessing.
+- Higher AUC = better classification performance.
+
+Conclusion 
+
+The most predictive combination of whether I exhibit "athlete-like heart rate patterns" includes stand hours, walking, running, and seasonal context
+with it AUCs reaching 0.803, which indicates very strong predictive power for a binary classification model in health behavior.
+
+```{r, echo = TRUE, message=FALSE}
+parsed_clean_by_day <- parsed_clean_by_day |>
+  mutate(is_athlete = low_heart_rate >= 40 & low_heart_rate <= 60)
+
+# define predictors
+predictors <- c("factor(season)", "EnergyBurned", "ExerciseTime", "standHours", "ran", "walk")
+
+# all combinations of predictors (excluding empty set)
+predictor_combos <- unlist(lapply(1:length(predictors), function(n) {
+  combn(predictors, n, simplify = FALSE)
+}), recursive = FALSE)
+
+# evaluate each model
+combo_results <- map_dfr(predictor_combos, function(vars) {
+  formula_str <- paste("factor(is_athlete) ~", paste(vars, collapse = " + "))
+  model <- glm(as.formula(formula_str), data = parsed_clean_by_day, family = binomial())
+  pred <- predict(model, type = "response")
+  
+  # Clean NAs
+  valid <- complete.cases(pred, parsed_clean_by_day$is_athlete)
+  
+  if (length(unique(parsed_clean_by_day$is_athlete[valid])) < 2) {
+    return(NULL) # skip if only one class is present
+  }
+  
+  roc_obj <- roc(parsed_clean_by_day$is_athlete[valid], pred[valid])
+  tibble(
+    predictors = paste(vars, collapse = " + "),
+    auc = as.numeric(auc(roc_obj))
+  )
+})
+
+# sort by best AUC
+combo_results <- combo_results |>
+  arrange(desc(auc))
+
+combo_results |> 
+  head(5) |> 
+  kable()
+
+
+```
