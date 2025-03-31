@@ -92,7 +92,20 @@ parsed_monthly_summary <- parsed_clean_by_day |>
 
 # The Data
 
-This analysis uses personal health data collected from Apple Health via Apple Watch, spanning from 2022 to the present. The dataset includes daily and monthly summaries of various activity and biometric metrics automatically recorded by Apple’s health tracking ecosystem.
+This analysis is based on *personal health data* collected by **Apple Health** through an **Apple Watch**, covering the period from **2022 to the present**.
+
+The dataset includes both **daily** and **monthly summaries** of activity and biometric metrics, automatically tracked by Apple’s health ecosystem.
+
+Key data features include:
+
+- Heart rate: `low_heart_rate`, `high_heart_rate`, `day_avg_heart_rate`
+- Energy burned and `ExerciseTime`
+- Workouts: `ran`, `walk`
+- Goal tracking: move, exercise, and stand goals
+- Temporal variables: `date`, `month_year`, `season`
+
+For details on the data parser and conversion scripts, visit the GitHub repository:  
+[https://github.com/paolacalle/health-data-analysis](https://github.com/paolacalle/health-data-analysis)
 
 # Intial Graphs
 

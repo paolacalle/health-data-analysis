@@ -130,10 +130,35 @@
 }
 \section{The Data}\label{the-data}
 
-This analysis uses personal health data collected from Apple Health via
-Apple Watch, spanning from 2022 to the present. The dataset includes
-daily and monthly summaries of various activity and biometric metrics
-automatically recorded by Apple's health tracking ecosystem.
+This analysis is based on \emph{personal health data} collected by
+\textbf{Apple Health} through an \textbf{Apple Watch}, covering the
+period from \textbf{2022 to the present}.
+
+The dataset includes both \textbf{daily} and \textbf{monthly summaries}
+of activity and biometric metrics, automatically tracked by Apple's
+health ecosystem.
+
+Key data features include:
+
+\begin{itemize}
+\tightlist
+\item
+  Heart rate: \texttt{low\_heart\_rate}, \texttt{high\_heart\_rate},
+  \texttt{day\_avg\_heart\_rate}
+\item
+  Energy burned and \texttt{ExerciseTime}
+\item
+  Workouts: \texttt{ran}, \texttt{walk}
+\item
+  Goal tracking: move, exercise, and stand goals
+\item
+  Temporal variables: \texttt{date}, \texttt{month\_year},
+  \texttt{season}
+\end{itemize}
+
+For details on the data parser and conversion scripts, visit the GitHub
+repository:\\
+\url{https://github.com/paolacalle/health-data-analysis}
 
 \section{Intial Graphs}\label{intial-graphs}
 
